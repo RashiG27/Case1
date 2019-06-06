@@ -1,0 +1,115 @@
+---
+ - hosts: all
+   tasks:
+     - name: installing lvm2
+       yum: name="lvm2" state="present"
+     - name: creating physical volume for attached hard disks; creating volumes for home and mysql; assigning lvm to home and mysql
+       shell: pvcreate /dev/xvdf /dev/xvdg ; vgcreate vg_for_home /dev/xvdf ; vgcreate vg_for_mysql /dev/xvdg ; lvcreate --size +4092M --name lv_for_home vg_for_home ; lvcreate --size +4092M lv_for_mysql vg_for_mysql
+     - name: formatting lvm partitions to xfs format
+       shell: mkfs.xfs /dev/mapper/vg_for_home-lv_for_home ; mkfs.xfs /dev/mapper/vg_for_mysql-lv_for_mysql
+     - name: mounting lv_home to /home2
+       shell: mount -o noexec /dev/mapper/vg_for_home-lv_for_home /home2
+     - name: mounting lv_mysql to /var/lib/mysql
+       shell: mount -o noexec /dev/mapper/vg_for_mysql-lv_for_mysql /var/lib/mysql
+     - name: Permanent mounting after rebooting for home2
+       shell: echo "/dev/mapper/vg_home-lv_home /home2 xfs noexec,defaults" >> /etc/fstab
+     - name: Permanent after rebooting for mysql
+       shell: echo "/dev/mapper/vg_mysql-lv_mysql /var/lib/mysql xfs noexec,defaults" >> /etc/fstab
+     - name: rebooting system
+       shell: reboot
+     - name: disabling SElinux
+       selinux: state="disabled" 
+     - name: setting timezone to IST
+       timezone: name="Asia/Kolkata"
+     - name: creating dynamic motd file for the server
+       copy:
+         dest: "/etc/profile.d/dynmotd.sh"
+         content: |
+          '#!/bin/bash
+          echo "###############################################################
+          #                 Authorized access only!                     #
+          # Disconnect IMMEDIATELY if you are not an authorized user!!! # 
+          #         All actions Will be monitored and recorded          #
+          ###############################################################
+          ++++++++++++++++++++++++++++++ SERVER INFO ++++++++++++++++++++++++++++++++
+                 CPU-`cat /proc/cpuinfo | grep "model name" | cut -d ":" -f2`
+                 Memory- `free -ht | grep Mem | cut -d " " -f12`
+                 Swap- `free -ht | grep Swap | cut -d " " -f13`
+                 Disk- ` df -hT | grep "/dev/xvda1" | cut -d " " -f36`
+                 Distro- `cat /etc/redhat-release` with `uname -r` 
+                 CPU Load- `uptime | cut -d ":" -f5`
+                 Free Memory- ` free -ht | grep Mem | cut -d " " -f28`
+                 Free Swap- `free -ht | grep Swap | cut -d " " -f33`
+                 Free Disk-  `df -hT | grep "/dev/xvda1" | cut -d " " -f40` 
+                 Public Address- `curl  http://ifconfig.me`
+                 Private Address- `ifconfig | grep eth0 -1 | grep inet | cut -d " " -f10`
+          +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++'
+     - name: installing apache 
+       yum: name="httpd" state="present"
+     - name: adding mariadb to the repo
+       yum_repository:
+                name: mariadb
+                description: mariadb yum repo file
+                baseurl: https://yum.mariadb.org/10.1/centos-amd64
+                gpgkey: https://yum.mariadb.org.RPM-GPG-KEY-MariaDB
+                gpgcheck: yes
+     - name: installing apache with ssl and proxy modules. PHP with required modules
+       yum: 
+         name: "{{item}}" 
+         state: present
+       with_items:
+                - mod_ssl
+                - https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+                - https://rpms.remirepo.net/enterprise/remi-release-7.rpm
+                - php72 
+                - php72-php-fpm 
+                - php72-php-gd 
+                - php72-php-json 
+                - php72-php-mbstring 
+                - php72-php-mysqlnd 
+                - php-72-php-xml 
+                - php72-php-xmlrpc 
+                - php72-php-opcache
+                - mariadb-server
+                - mariadb-client
+     - name: Starting mariadb
+       shell: systemctl start mariadb;
+              systemctl enable mariadb;
+              mysql_secure_installation;
+              mysql --max-allowed-packet=1G -p
+     - name: creating passwordless user wp
+       user: 
+          name: wp
+          uid: 1201
+          password: redhat
+     - name: creating passwordless user magento
+       user:
+          name: magento
+          uid: 1202
+          password: redhat
+     - name: enabling passwordAuthentication to yes
+       lineinfile:
+             path: /etc/ssh/sshd_config
+             regexp: '^PasswordAuthentication.*no'
+             line: 'PasswordAuthentication=yes'
+       notify: restart_sshd
+     - name: SSH KeyGen command
+       shell: ssh-keygen -q -b 2048 -t rsa -N "" -C "creating SSH" -f ~/.ssh/id_rsa; creates="~/.ssh/id_rsa"
+     - name: Fetch the keyfile from one server to another
+       fetch: 
+         src: "~/.ssh/id_rsa.pub"
+         dest: "buffer/{{ansible_hostname}}-id_rsa.pub"
+         flat: yes
+
+     - name: Copy the file from master to the destination
+       copy:
+         src: "buffer/{{item.dest}}-id_rsa.pub"
+         dest: "/tmp/remote-id_rsa.pub"  
+       when: "{{ item.dest != ansible_hostname }}"
+       with_items: 
+         - { dest: "{{groups['app'][1]}}"}
+         - { dest: "{{groups['app'][0]}}"}
+
+     - name: add the public key into Authorized_keys file to enable Key Auth
+       shell: "cat /tmp/remote-id_rsa.pub >> ~/.ssh/authorized_keys"
+       register: addtoauth
